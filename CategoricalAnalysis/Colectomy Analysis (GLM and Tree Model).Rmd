@@ -1,0 +1,453 @@
+---
+title: "Modeling Risk Associated with Colectomy Procedures for Anastomotic Leaking"
+author: "Jacob Kramp"
+date: "8/8/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(data.table)
+library(rpart)
+library(caret)
+library(knitr)
+library(car)
+df <- data.frame(fread('colon2017.csv'))
+set.seed(2021)
+```
+
+# Introduction
+
+---
+
+We have been asked by a hospital that has conducted several colectomy procedures to analyze several covariates collected about each patient and the covariate's relationship to the risk associated to anastomotic leaking. We have been given a datset containing `r nrow(df)` cases from which we will attempt to model the risk using a generalized linear model. We will also assess the assumptions made while using the model and whther or not there may be a better fitting model available. 
+
+# Analyzing the Model with Respect to BMI of Patient
+
+---
+
+In order to reduce noise in our model created by very small changes in our covariate, BMI, we will discretize the BMI by rounding the BMI either up or down. We will continue to treat BMI as a numeric predictor.Using the glm() function in R, The results of our model are printed below:
+
+```{r echo = F}
+# Multivariate Case
+dff <- df[,c("Gender","Height..in.","Weight..lbs.",'BMI','Age','Race',"Tobacco",'DM',"CAD.PAD",
+             'Cancer',"Albumin..g.dL." ,"Operative.Length","Anastamotic.Leak")]
+#Adjust spelling of white
+dff$Race[grep('W',dff$Race)] <- 'W'
+dff$Race[grep('w',dff$Race)] <- 'W'
+attach(dff)
+# GLM Model
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+summary(model.glm)
+
+```
+
+According to our model,a one unit increase in BMI will lead to an estimated +`r round(as.numeric(exp(model.glm$coefficients['BMI'])),2)` modification to the odds of having an anastomic leak.In other words, a 1 unit increase of BMI, is an estimated `r round((as.numeric(exp(model.glm$coefficients['BMI']))-1) *100,2)`% change in odds of an anastomic leak.
+Now, before we continue, we should assess the validity of our model to be sure that our results are trustworthy.
+
+```{r echo = F}
+y <- dff$Anastamotic.Leak
+pearson = (y - model.glm$fit)/(model.glm$fit*(1-model.glm$fit))
+est.ln.odds = log(model.glm$fit/(1-model.glm$fit))
+loess1 = loess(pearson~est.ln.odds)
+plot(est.ln.odds,pearson)
+lines(est.ln.odds[order(est.ln.odds)],loess1$fit[order(est.ln.odds)],col = 'red')
+```
+
+The red line shown in the graph would ideally be shaped as a contant line at Pearson = 0. The behavior of the red line indicates that this model may not fit our data very well when our covariate values get much larger. There may be a more competitive model available.
+
+# Would a Tree Model Make a More Accurate Prediction?
+
+---
+
+  The use of a tree model (the only other classification model covered thus far) should be evaluated for a possibly better performance in this situation. The results of the tree model constructed can be visualized below.
+ 
+```{r echo = F}
+model.tree <- rpart(Anastamotic.Leak~.,data = dff,method = 'class',control=rpart.control(minsplit=2, cp=0.001))
+rpart.plot::rpart.plot(model.tree)
+```
+
+To assess which model is performing best, we can calculate the log likelihood of each model using a cross-validated set of p-value estimates. The cross-validated method that we'll use here is the leave one out method. We'll show the first five rows of our computed p-values and cross-validated p-values to show some of the process.  
+
+```{r echo = F}
+#Cross validate by computing log likelihood of glm and tree model
+results = data.frame(y = df$Anastamotic.Leak,p = predict.glm(model.glm,newdata=dff,type="response"),cv.p=0)
+for(i in 1:nrow(dff)){
+  #Leave one out
+  traind <- dff[-i,]
+  testd <- dff[i,]
+  glm.t <- glm(Anastamotic.Leak~.,data = traind,family = 'binomial')
+  results[i,'cv.p'] <- predict.glm(glm.t,newdata=testd,type="response")
+}
+LL.glm = sum(results$y*log(results$p) + (1-results$y)*log(1-results$p))
+CV.LL.glm = sum(results$y*log(results$cv.p) + (1-results$y)*log(1-results$cv.p))
+
+knitr::kable(head(results))
+lldf <- data.frame(ll.glm = LL.glm,cv.ll.glm = CV.LL.glm)
+colnames(lldf) <- c('Log-likelihood of GLM','CV Log-likelihood of GLM')
+knitr::kable(lldf)
+
+#Same thing for tree model
+results = data.frame(y = df$Anastamotic.Leak,p = predict(model.tree,newdata=dff,type="prob"),cv.p=0)
+for(i in 1:nrow(dff)){
+  #leave 10% out
+  t <- sample(1:nrow(dff),20)
+  traind <- dff[-t,]
+  testd <- dff[t,]
+  tree.t <- rpart(Anastamotic.Leak~.,data = traind,method = 'class',control=rpart.control(minsplit=2, cp=0.1))
+  pred <- predict(tree.t,newdata=testd,type="prob")
+  results[t,'cv.p'] <- pred[,'1']
+}
+#Make small adjustment to be able to calculate log likelihood
+results[,-1][results[,-1]==0] <- .00001
+results[,-1][results[,-1]==1] <- .99999
+
+LL.tree = sum(results$y*log(results$p.1) + (1-results$y)*log(1-results$p.1))
+CV.LL.tree = sum(results$y*log(results$cv.p) + (1-results$y)*log(1-results$cv.p))
+
+knitr::kable(head(results))
+lldf <- data.frame(ll.tree = LL.tree,cv.ll.tree = CV.LL.tree)
+colnames(lldf) <- c('Log-likelihood of Tree','CV Log-likelihood of Tree')
+knitr::kable(lldf)
+```
+
+The tree model is obviously overfitting the data according to the log likelihood before cross validating. A log likelihood of `r LL.tree`  compared to the cross validated log likelihood of `r CV.LL.tree` is evidence of that. Still, the GLM model seems to perform better according to the cross validated log likelihood. We will continue to use that model as a result. 
+
+# Variable Selection
+
+---
+
+Now we'll consider every relevant covariate given to us in our dataset.
+
+```{r echo = F}
+
+# Multivariate Case
+dff <- df[,c("Gender","Height..in.","Weight..lbs.",'BMI','Age','Race',"Tobacco",'DM',"CAD.PAD",
+             'Cancer',"Albumin..g.dL." ,"Operative.Length","Anastamotic.Leak")]
+#Adjust spelling of white
+dff$Race[grep('W',dff$Race)] <- 'W'
+attach(dff)
+# GLM Model
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+summary(model.glm)
+
+```
+
+Interestingly enough, in the presence of the other covariates, BMI is not statistically significant. This does not directly mean that BMI is not an important predictor. In fact, we should use an objective measure of fit to identify which predictors are important for the performance of the model and which of them are not. 
+We will use AIC to determine which predictors to keep and which to toss out of our dataset. The step() function in R will remove a predictor one at a time and evaluate the new model's AIC to determine if the model will fit better after removing that variable. It will do this process repeatedly until the AIC is best when not removing any covariates. The results are shown below.  
+
+
+```{r echo =F,include=F}
+s <- step(model.glm)
+summary(s)
+```
+
+```{r echo =F}
+summary(s)
+```
+
+ In conclusion, the most important predictors that were given to us appear to be Gender, BMI, Age, whether the subject uses Tobacco or not, whether the subject has Diabetes or not, the Albumin levels, and the length of operation. 
+
+# Case Studies and a Visual of Risk associated with Obesity
+
+---
+
+Our first visual shows the increasing probability of a leak for Arizona Robbins; a 35 year old white female who doesn't use tobacco, doesn't have diabetes, doesn't have CAD or PAD, doesn't have cancer, has a post-operative albumin level of 4.2 and whose operation length took 90 minutes.
+
+```{r echo = F}
+#Bootstrap  predictions and their confidence intervals
+dff <- df[,c("Gender",'BMI','Age',"Tobacco",'DM',"Albumin..g.dL." ,"Operative.Length","Anastamotic.Leak")]
+
+AR <- data.frame(
+  Gender = as.character(rep('Female',10)),
+  BMI = as.integer(seq(27,60,length.out = 10)),
+  Tobacco = as.integer(rep(0,10)),
+  DM = as.integer(rep(0,10)),
+  Albumin..g.dL. = as.numeric(rep(4.2,10)),
+  Operative.Length = as.numeric(rep(90 *0.000694444,10)),
+  Age = as.integer(rep(35,10))
+)
+
+#Train model with original data
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+predictions = data.frame(bmi = numeric(),pstar = numeric(),lower = numeric(),upper = numeric())
+for(w in 1:nrow(AR)){
+  phat.star = data.frame(bmi = numeric(),phat = numeric())
+  for(i in 1:1000){
+    #Get size of possible sample
+    n <- nrow(dff)
+    #Take a sample of size in with independence
+    BS.x = dff[sample(1:n,n,replace = T),]
+    #Plug BS.x into model for BS.phat
+    log.lik <- predict.glm(model.glm,BS.x)
+    phat <- 1/(1+exp(-log.lik))
+    #Bootstrap y values
+    BS.y <- sapply(1:length(phat),function(p){
+      sample(c(1,0),1,prob = c(phat[p],(1-phat[p])))
+    })
+    new.data = data.frame(Anastamotic.Leak=BS.y,BS.x[,-grep('Anastamotic.Leak',colnames(BS.x))])
+    #Fit new model
+    new.model <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = new.data)
+    #Make the desired prediction 
+    phat <- predict.glm(new.model,AR[w,],type='response')
+    phat.star <- rbind(phat.star,data.frame(bmi = AR[w,'BMI'],phat=phat))
+  }
+  lower = quantile(phat.star[,'phat'],.025)
+  upper = quantile(phat.star[,'phat'],.975)
+  pstar = mean(phat.star[,'phat'])
+  bmi = unique(phat.star[,'bmi'])
+  predictions = rbind(predictions,data.frame(bmi=bmi,pstar=pstar,lower = lower,upper=upper))
+}
+plot(predictions$bmi,predictions$pstar,ylab = 'Estimated Probability',xlab = 'BMI')                                                                                                         
+lines(x = predictions$bmi,y = predictions$lower,col = 'blue')
+lines(x = predictions$bmi,y = predictions$upper,col = 'red')
+polygon(c(predictions$bmi, rev(predictions$bmi)), c(predictions$upper, rev(predictions$lower)),
+        border = NA,col=rgb(1, 0, .5,0.1))
+
+```
+
+\newpage
+
+The second is for Richard Webber, a 62 African American male who uses tobacco and has diabetes and whom had an albumin level of 2.8 following a 210 minute operation.
+
+
+```{r echo = F}
+#Bootstrap  predictions and their confidence intervals
+
+AR <- data.frame(
+  Gender = as.character(rep('Male',10)),
+  BMI = as.integer(seq(27,60,length.out = 10)),
+  Tobacco = as.integer(rep(1,10)),
+  DM = as.integer(rep(1,10)),
+  Albumin..g.dL. = as.numeric(rep(2.8,10)),
+  Operative.Length = as.numeric(rep(210 *0.000694444,10)),
+  Age = as.integer(rep(62,10))
+)
+
+#Train model with original data
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+predictions = data.frame(bmi = numeric(),pstar = numeric(),lower = numeric(),upper = numeric())
+for(w in 1:nrow(AR)){
+  phat.star = data.frame(bmi = numeric(),phat = numeric())
+  for(i in 1:1000){
+    #Get size of possible sample
+    n <- nrow(dff)
+    #Take a sample of size in with independence
+    BS.x = dff[sample(1:n,n,replace = T),]
+    #Plug BS.x into model for BS.phat
+    log.lik <- predict.glm(model.glm,BS.x)
+    phat <- 1/(1+exp(-log.lik))
+    #Bootstrap y values
+    BS.y <- sapply(1:length(phat),function(p){
+      sample(c(1,0),1,prob = c(phat[p],(1-phat[p])))
+    })
+    new.data = data.frame(Anastamotic.Leak=BS.y,BS.x[,-grep('Anastamotic.Leak',colnames(BS.x))])
+    #Fit new model
+    new.model <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = new.data)
+    #Make the desired prediction 
+    phat <- predict.glm(new.model,AR[w,],type='response')
+    phat.star <- rbind(phat.star,data.frame(bmi = AR[w,'BMI'],phat=phat))
+  }
+  lower = quantile(phat.star[,'phat'],.025)
+  upper = quantile(phat.star[,'phat'],.975)
+  pstar = mean(phat.star[,'phat'])
+  bmi = unique(phat.star[,'bmi'])
+  predictions = rbind(predictions,data.frame(bmi=bmi,pstar=pstar,lower = lower,upper=upper))
+}
+plot(predictions$bmi,predictions$pstar,ylab = 'Estimated Probability',xlab = 'BMI')                                                                                                         
+lines(x = predictions$bmi,y = predictions$lower,col = 'blue')
+lines(x = predictions$bmi,y = predictions$upper,col = 'red')
+polygon(c(predictions$bmi, rev(predictions$bmi)), c(predictions$upper, rev(predictions$lower)),
+        border = NA,col=rgb(1, 0, .5,0.1))
+
+```
+
+Although the male subject is more likely to have a leak after surgery, both visualizations show the increase rik caused by obesity are large. This is especially true if you have other underlying factors that significantly increase yor risk. 
+
+
+# Index (Code)
+
+```{r eval=F}
+
+library(tidyverse)
+library(data.table)
+library(rpart)
+library(caret)
+library(knitr)
+library(car)
+df <- data.frame(fread('colon2017.csv'))
+set.seed(2021)
+
+# Multivariate Case
+dff <- df[,c("Gender","Height..in.","Weight..lbs.",'BMI','Age','Race',"Tobacco",'DM',"CAD.PAD",
+             'Cancer',"Albumin..g.dL." ,"Operative.Length","Anastamotic.Leak")]
+#Adjust spelling of white
+dff$Race[grep('W',dff$Race)] <- 'W'
+dff$Race[grep('w',dff$Race)] <- 'W'
+attach(dff)
+# GLM Model
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+summary(model.glm)
+
+y <- dff$Anastamotic.Leak
+pearson = (y - model.glm$fit)/(model.glm$fit*(1-model.glm$fit))
+est.ln.odds = log(model.glm$fit/(1-model.glm$fit))
+loess1 = loess(pearson~est.ln.odds)
+plot(est.ln.odds,pearson)
+lines(est.ln.odds[order(est.ln.odds)],loess1$fit[order(est.ln.odds)],col = 'red')
+
+#Tree
+model.tree <- rpart(Anastamotic.Leak~.,data = dff,method = 'class',control=rpart.control(minsplit=2, cp=0.001))
+rpart.plot::rpart.plot(model.tree)
+
+#Cross validate by computing log likelihood of glm and tree model
+results = data.frame(y = df$Anastamotic.Leak,p = predict.glm(model.glm,newdata=dff,type="response"),cv.p=0)
+for(i in 1:nrow(dff)){
+  #Leave one out
+  traind <- dff[-i,]
+  testd <- dff[i,]
+  glm.t <- glm(Anastamotic.Leak~.,data = traind,family = 'binomial')
+  results[i,'cv.p'] <- predict.glm(glm.t,newdata=testd,type="response")
+}
+LL.glm = sum(results$y*log(results$p) + (1-results$y)*log(1-results$p))
+CV.LL.glm = sum(results$y*log(results$cv.p) + (1-results$y)*log(1-results$cv.p))
+
+knitr::kable(head(results))
+lldf <- data.frame(ll.glm = LL.glm,cv.ll.glm = CV.LL.glm)
+colnames(lldf) <- c('Log-likelihood of GLM','CV Log-likelihood of GLM')
+knitr::kable(lldf)
+
+#Same thing for tree model
+results = data.frame(y = df$Anastamotic.Leak,p = predict(model.tree,newdata=dff,type="prob"),cv.p=0)
+for(i in 1:nrow(dff)){
+  #leave 10% out
+  t <- sample(1:nrow(dff),20)
+  traind <- dff[-t,]
+  testd <- dff[t,]
+  tree.t <- rpart(Anastamotic.Leak~.,data = traind,method = 'class',control=rpart.control(minsplit=2, cp=0.1))
+  pred <- predict(tree.t,newdata=testd,type="prob")
+  results[t,'cv.p'] <- pred[,'1']
+}
+#Make small adjustment to be able to calculate log likelihood
+results[,-1][results[,-1]==0] <- .00001
+results[,-1][results[,-1]==1] <- .99999
+
+LL.tree = sum(results$y*log(results$p.1) + (1-results$y)*log(1-results$p.1))
+CV.LL.tree = sum(results$y*log(results$cv.p) + (1-results$y)*log(1-results$cv.p))
+
+knitr::kable(head(results))
+lldf <- data.frame(ll.tree = LL.tree,cv.ll.tree = CV.LL.tree)
+colnames(lldf) <- c('Log-likelihood of Tree','CV Log-likelihood of Tree')
+knitr::kable(lldf)
+
+# Multivariate Case
+dff <- df[,c("Gender","Height..in.","Weight..lbs.",'BMI','Age','Race',"Tobacco",'DM',"CAD.PAD",
+             'Cancer',"Albumin..g.dL." ,"Operative.Length","Anastamotic.Leak")]
+#Adjust spelling of white
+dff$Race[grep('W',dff$Race)] <- 'W'
+attach(dff)
+# GLM Model
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+summary(model.glm)
+
+s <- step(model.glm)
+summary(s)
+
+#Bootstrap  predictions and their confidence intervals
+dff <- df[,c("Gender",'BMI','Age',"Tobacco",'DM',"Albumin..g.dL." ,"Operative.Length","Anastamotic.Leak")]
+
+AR <- data.frame(
+  Gender = as.character(rep('Female',10)),
+  BMI = as.integer(seq(27,60,length.out = 10)),
+  Tobacco = as.integer(rep(0,10)),
+  DM = as.integer(rep(0,10)),
+  Albumin..g.dL. = as.numeric(rep(4.2,10)),
+  Operative.Length = as.numeric(rep(90 *0.000694444,10)),
+  Age = as.integer(rep(35,10))
+)
+
+#Train model with original data
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+predictions = data.frame(bmi = numeric(),pstar = numeric(),lower = numeric(),upper = numeric())
+for(w in 1:nrow(AR)){
+  phat.star = data.frame(bmi = numeric(),phat = numeric())
+  for(i in 1:1000){
+    #Get size of possible sample
+    n <- nrow(dff)
+    #Take a sample of size in with independence
+    BS.x = dff[sample(1:n,n,replace = T),]
+    #Plug BS.x into model for BS.phat
+    log.lik <- predict.glm(model.glm,BS.x)
+    phat <- 1/(1+exp(-log.lik))
+    #Bootstrap y values
+    BS.y <- sapply(1:length(phat),function(p){
+      sample(c(1,0),1,prob = c(phat[p],(1-phat[p])))
+    })
+    new.data = data.frame(Anastamotic.Leak=BS.y,BS.x[,-grep('Anastamotic.Leak',colnames(BS.x))])
+    #Fit new model
+    new.model <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = new.data)
+    #Make the desired prediction 
+    phat <- predict.glm(new.model,AR[w,],type='response')
+    phat.star <- rbind(phat.star,data.frame(bmi = AR[w,'BMI'],phat=phat))
+  }
+  lower = quantile(phat.star[,'phat'],.025)
+  upper = quantile(phat.star[,'phat'],.975)
+  pstar = mean(phat.star[,'phat'])
+  bmi = unique(phat.star[,'bmi'])
+  predictions = rbind(predictions,data.frame(bmi=bmi,pstar=pstar,lower = lower,upper=upper))
+}
+plot(predictions$bmi,predictions$pstar,ylab = 'Estimated Probability',xlab = 'BMI')                                                                                                         
+lines(x = predictions$bmi,y = predictions$lower,col = 'blue')
+lines(x = predictions$bmi,y = predictions$upper,col = 'red')
+polygon(c(predictions$bmi, rev(predictions$bmi)), c(predictions$upper, rev(predictions$lower)),
+        border = NA,col=rgb(1, 0, .5,0.1))
+
+
+#Bootstrap  predictions and their confidence intervals
+
+AR <- data.frame(
+  Gender = as.character(rep('Male',10)),
+  BMI = as.integer(seq(27,60,length.out = 10)),
+  Tobacco = as.integer(rep(1,10)),
+  DM = as.integer(rep(1,10)),
+  Albumin..g.dL. = as.numeric(rep(2.8,10)),
+  Operative.Length = as.numeric(rep(210 *0.000694444,10)),
+  Age = as.integer(rep(62,10))
+)
+
+#Train model with original data
+model.glm <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = dff)
+predictions = data.frame(bmi = numeric(),pstar = numeric(),lower = numeric(),upper = numeric())
+for(w in 1:nrow(AR)){
+  phat.star = data.frame(bmi = numeric(),phat = numeric())
+  for(i in 1:1000){
+    #Get size of possible sample
+    n <- nrow(dff)
+    #Take a sample of size in with independence
+    BS.x = dff[sample(1:n,n,replace = T),]
+    #Plug BS.x into model for BS.phat
+    log.lik <- predict.glm(model.glm,BS.x)
+    phat <- 1/(1+exp(-log.lik))
+    #Bootstrap y values
+    BS.y <- sapply(1:length(phat),function(p){
+      sample(c(1,0),1,prob = c(phat[p],(1-phat[p])))
+    })
+    new.data = data.frame(Anastamotic.Leak=BS.y,BS.x[,-grep('Anastamotic.Leak',colnames(BS.x))])
+    #Fit new model
+    new.model <- glm(Anastamotic.Leak ~ .,family = 'binomial',data = new.data)
+    #Make the desired prediction 
+    phat <- predict.glm(new.model,AR[w,],type='response')
+    phat.star <- rbind(phat.star,data.frame(bmi = AR[w,'BMI'],phat=phat))
+  }
+  lower = quantile(phat.star[,'phat'],.025)
+  upper = quantile(phat.star[,'phat'],.975)
+  pstar = mean(phat.star[,'phat'])
+  bmi = unique(phat.star[,'bmi'])
+  predictions = rbind(predictions,data.frame(bmi=bmi,pstar=pstar,lower = lower,upper=upper))
+}
+plot(predictions$bmi,predictions$pstar,ylab = 'Estimated Probability',xlab = 'BMI')                                                                                                         
+lines(x = predictions$bmi,y = predictions$lower,col = 'blue')
+lines(x = predictions$bmi,y = predictions$upper,col = 'red')
+polygon(c(predictions$bmi, rev(predictions$bmi)), c(predictions$upper, rev(predictions$lower)),
+        border = NA,col=rgb(1, 0, .5,0.1))
+```
