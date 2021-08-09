@@ -1,0 +1,435 @@
+---
+title: "PCA and Factor Analysis"
+author: "Jacob Kramp"
+date: "8/8/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(nFactors)
+set.seed(2021)
+setwd("~/Math 537")
+
+college <- read.csv('college.csv')
+n <- nrow(college)
+p <- ncol(college)
+```
+
+# Introduction
+
+---
+
+We will be evaluating two datsets using a variety of parametric methods and evaluating which method will model our given data sets best. We will do so by using an objective measure of fit, Mean Squared Error, in a cross validation process. By splitting our data sets in training and testing subsets, we can give our models/methods enough information to make predictions on the test datasets in a supervised setting (We will know what the true observations are). Our first dataset includes information surrounding the exclusivity of a college and we have been asked to model exclusivity as a response variable. In the second data set, we will be using Principal component analysis and factor analysis to model a set of response variables providing information on image sequences of subjects while driving in real scenarios. Specifically, we'll model their head direction captured in the images. 
+
+
+# Analysis of the College Dataset 
+
+---
+
+
+```{r include=F}
+#Calculate exclusivity
+
+college <- mutate(college,exclusivity = (100*(Apps-Accept)/(Apps) + 100*(Enroll/Accept)))
+exclusivity <- college$exclusivity
+#Normalize predictors
+znorm <- function(x){
+  m <- mean(x)
+  s <- sd(x)
+  (x-m)/s
+}
+
+college <- lapply(college %>% dplyr::select(Private,Top10perc,Top25perc,
+                          F.Undergrad,P.Undergrad,Outstate,
+                          Room.Board,Books,Personal,
+                          PhD,Terminal,S.F.Ratio,perc.alumni,
+                          Expend,Grad.Rate),function(col){
+                            c <- as.numeric(col)
+                            znorm(c)
+}) %>% bind_cols() %>% data.frame
+college$exclusivity <- exclusivity
+#Split into training and test data
+
+train <- sample(1:n,size = floor(.75*n),replace=F)
+c.train <- college[train,]
+c.test <- college[-train,]
+
+
+#Attach training data
+attach(c.train)
+#Linear Model
+
+linear <- lm(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+               P.Undergrad + Outstate + Room.Board + Books + Personal +
+               PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate,data=c.train)
+summary(linear)
+
+linear.AIC <- step(linear)
+summary(linear.AIC)
+
+#Evaluate the performance of the linear model
+
+p <- predict(linear.AIC,c.test)
+linear.mse <- mean((c.test$exclusivity - p)^2)
+
+
+#Ridge regression
+library(MASS)
+library(caret)
+library(glmnet)
+
+# Predictor variables
+x <- model.matrix(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+                    P.Undergrad + Outstate + Room.Board + Books + Personal +
+                    PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, c.train)[,-1]
+
+# Outcome variable
+y <- c.train$exclusivity
+
+#Find CV best lambda for Ridge Regression
+#alpha is the blending parameter for lambda.  if alpha = 0, all of lambda is L2 norm (ridge)
+#If alpha = 1 then all of lamba is L1 norm (Lasso).  If alpha is anything between then
+#you get a portion of lambda for L1 and a portion for L2.
+
+cv <- cv.glmnet(x, y, alpha = 0)
+cv$lambda.min
+
+model <- glmnet(x, y, alpha = 0, lambda = cv$lambda.min)
+coef(model)
+summary(model)
+
+#Make predictions
+x.test <-  model.matrix(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+                          P.Undergrad + Outstate + Room.Board + Books + Personal +
+                          PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, c.test)[,-1]
+p <- predict(model,x.test)
+Ridge.mse <- mean((c.test$exclusivity - p)^2)
+
+
+#Lasso Model
+cv <- cv.glmnet(x, y, alpha = 1)
+cv$lambda.min
+
+model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+coef(model)
+summary(model)
+
+#Make predictions
+x.test <-  model.matrix(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+                          P.Undergrad + Outstate + Room.Board + Books + Personal +
+                          PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, c.test)[,-1]
+p <- predict(model,x.test)
+Lasso.mse <- mean((c.test$exclusivity - p)^2)
+
+
+#Elastic Net
+
+elastic <- train(
+  exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+    P.Undergrad + Outstate + Room.Board + Books + Personal +
+    PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, 
+  data = c.train, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+# Model coefficients
+coef(elastic$finalModel, elastic$bestTune$lambda)
+# Make predictions
+p <- elastic %>% predict(c.test)
+Elastic.mse <- mean((c.test$exclusivity - p)^2)
+
+
+# PCR
+require(pls)
+
+pcr_model = pcr(y~x,ncomp=12)
+pcr_summary <-summary(pcr_model)
+
+p <- pcr_model %>% predict(x.test)
+pcr.mse <- mean((c.test$exclusivity - p)^2)
+
+#PLSR
+partial_model = plsr(y~x,validation="CV",ncomp=6)
+summary(partial_model)
+
+p <- partial_model %>% predict(x.test)
+plsr.mse <- mean((c.test$exclusivity - p)^2)
+
+
+```
+
+  The resulting MSE for each method attempted on the dataset is shown below. We observed that since there is not a significant amount of overfitting or collinearity, regularization methods didn't perform as well as using a Multiple Linear Regression model.
+
+```{r echo = F}
+result.mse <- data.frame(MSE = c(linear.mse,Ridge.mse,Lasso.mse,Elastic.mse,pcr.mse,plsr.mse))
+rownames(result.mse) <- c('Linear','Ridge','Lasso','Elastic','PCR','PLSR')
+
+knitr::kable(result.mse)
+```
+
+  To better show this, we can print the summary of our PCR result in R.
+  
+```{r echo = F}
+pcr_model = pcr(y~x)
+summary(pcr_model)
+```
+
+If PCR was expected to perform well, the amount of variance explained would taper off with each added component after a sufficient number of components were used. Here, we see that it takes almost all of the components to see a small exchange of information for shrinkage.  This is not ideal, and this result is not surprising after seeing our MSE for PCR compared to the Linear Regression model. We essentially have to use almost all of our components.
+
+For comparison, we can also view the result of the PLSR model.
+
+```{r echo = F}
+partial_model = plsr(y~x,validation="CV")
+summary(partial_model)
+```
+
+
+Notice that here we do see an "elbowing" effect where there is a small amount of added variance explained after 4-6 components are added. This tells us that PLSR may have performed better and made more sense to use over PCR, but it still didn't perform better than our Multiple Linear Regression Model.We can use just 6 of our components here. 
+
+
+# Analysis of Facial Recognition Data
+
+---
+
+We begin to analyze the data using Principal Component Analysis.
+
+```{r echo = F}
+drive <- read.csv("C:\\Users\\Jacob\\Documents\\Math 537\\drivPoints.txt")
+no <- lapply(drive[,6:ncol(drive)],function(col){
+  znorm(col)
+}) %>% bind_cols() %>% data.frame
+pred <- drive[,5]
+x <- data.frame(pred,no)
+
+# Pricipal Components Analysis
+# entering raw data and extracting PCs
+# from the correlation matrix
+fit <- princomp(x, cor=TRUE)
+#summary(fit) # print variance accounted for
+#loadings(fit) # pc loadings
+plot(fit,type="lines") # scree plot
+#fit$scores # the principal components
+#biplot(fit) 
+pca <- prcomp(x[,-1])
+pca$rotation[,1:4]
+
+```
+
+From the above scree plot, we can observe that the elbowing effect begins to happen at 4 components. Beyond 4-5 components, the amount of variance explained by adding additonal components severely decreases. Observe that in our 4 chosen components, the first 2 components loads quite a bit of information of the position of your face and the other two components are loading information of the actual dimensions of your face. This si showing that we can reduce our number of predictors to four principal components containing information on the dimensions and positions of your face.
+
+Now we can take a look at the results of a Factor Analysis.
+
+```{r echo = F}
+# Factor Analysis
+
+#In this dataset the 4,5 columns are response information
+
+#We're first going to do some exploratory factor analysis, then we'll play around with some confirmatory factor analysis.  First step is to isolate the predictors.
+
+X = drive[,-c(1:5)]
+
+# Determine Number of Factors to Extract
+
+ev <- eigen(cor(X)) # get eigenvalues
+ap <- parallel(subject=nrow(X),var=ncol(X),
+               rep=100,cent=.05)
+nS <- nScree(x=ev$values, aparallel=ap$eigen$qevpea)
+plotnScree(nS) 
+
+fact.model = factanal(X,factors=4,rotation="varimax")
+#fact.model
+names(fact.model)
+fact.model$loadings
+loadings = fact.model$loadings[,1:3]
+plot(loadings,type="n")
+text(loadings,labels=names(X),cex=.7)
+lines(c(-2,2),c(0,0),lty=2,lwd=.7)
+lines(c(0,0),c(-2,2),lty=2,lwd=.7)
+```
+
+Both the graph and the loading variables shown in the printed table are showing us the same thing. The first factor is loading information for our X position data, factor 2 is loading data for our y position, factor 3 is obviously loading the most information in the hf variable, and factor 4 contains information on the wf information. The factor analysis has literally told us that our set of predictor variables can be reduced to those four factors. Although that information is very useful, we cannot make predictions using our factor analysis. We cannot create our source data that we would need to predict and Factor analysis is purely exploratory. 
+
+# Index (Code)
+
+---
+
+```{r eval=F}
+#Calculate exclusivity
+
+college <- mutate(college,exclusivity = (100*(Apps-Accept)/(Apps) + 100*(Enroll/Accept)))
+exclusivity <- college$exclusivity
+#Normalize predictors
+znorm <- function(x){
+  m <- mean(x)
+  s <- sd(x)
+  (x-m)/s
+}
+
+college <- lapply(college %>% dplyr::select(Private,Top10perc,Top25perc,
+                          F.Undergrad,P.Undergrad,Outstate,
+                          Room.Board,Books,Personal,
+                          PhD,Terminal,S.F.Ratio,perc.alumni,
+                          Expend,Grad.Rate),function(col){
+                            c <- as.numeric(col)
+                            znorm(c)
+}) %>% bind_cols() %>% data.frame
+college$exclusivity <- exclusivity
+#Split into training and test data
+
+train <- sample(1:n,size = floor(.75*n),replace=F)
+c.train <- college[train,]
+c.test <- college[-train,]
+
+
+#Attach training data
+attach(c.train)
+#Linear Model
+
+linear <- lm(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+               P.Undergrad + Outstate + Room.Board + Books + Personal +
+               PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate,data=c.train)
+summary(linear)
+
+linear.AIC <- step(linear)
+summary(linear.AIC)
+
+#Evaluate the performance of the linear model
+
+p <- predict(linear.AIC,c.test)
+linear.mse <- mean((c.test$exclusivity - p)^2)
+
+
+#Ridge regression
+library(MASS)
+library(caret)
+library(glmnet)
+
+# Predictor variables
+x <- model.matrix(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+                    P.Undergrad + Outstate + Room.Board + Books + Personal +
+                    PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, c.train)[,-1]
+
+# Outcome variable
+y <- c.train$exclusivity
+
+#Find CV best lambda for Ridge Regression
+#alpha is the blending parameter for lambda.  if alpha = 0, all of lambda is L2 norm (ridge)
+#If alpha = 1 then all of lamba is L1 norm (Lasso).  If alpha is anything between then
+#you get a portion of lambda for L1 and a portion for L2.
+
+cv <- cv.glmnet(x, y, alpha = 0)
+cv$lambda.min
+
+model <- glmnet(x, y, alpha = 0, lambda = cv$lambda.min)
+coef(model)
+summary(model)
+
+#Make predictions
+x.test <-  model.matrix(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+                          P.Undergrad + Outstate + Room.Board + Books + Personal +
+                          PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, c.test)[,-1]
+p <- predict(model,x.test)
+Ridge.mse <- mean((c.test$exclusivity - p)^2)
+
+
+#Lasso Model
+cv <- cv.glmnet(x, y, alpha = 1)
+cv$lambda.min
+
+model <- glmnet(x, y, alpha = 1, lambda = cv$lambda.min)
+coef(model)
+summary(model)
+
+#Make predictions
+x.test <-  model.matrix(exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+                          P.Undergrad + Outstate + Room.Board + Books + Personal +
+                          PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, c.test)[,-1]
+p <- predict(model,x.test)
+Lasso.mse <- mean((c.test$exclusivity - p)^2)
+
+
+#Elastic Net
+
+elastic <- train(
+  exclusivity~Private + Top10perc + Top25perc + F.Undergrad + 
+    P.Undergrad + Outstate + Room.Board + Books + Personal +
+    PhD + Terminal + S.F.Ratio + perc.alumni + Expend + Grad.Rate, 
+  data = c.train, method = "glmnet",
+  trControl = trainControl("cv", number = 10),
+  tuneLength = 10
+)
+# Model coefficients
+coef(elastic$finalModel, elastic$bestTune$lambda)
+# Make predictions
+p <- elastic %>% predict(c.test)
+Elastic.mse <- mean((c.test$exclusivity - p)^2)
+
+
+# PCR
+require(pls)
+
+pcr_model = pcr(y~x,ncomp=12)
+pcr_summary <-summary(pcr_model)
+
+p <- pcr_model %>% predict(x.test)
+pcr.mse <- mean((c.test$exclusivity - p)^2)
+
+#PLSR
+partial_model = plsr(y~x,validation="CV",ncomp=6)
+summary(partial_model)
+
+p <- partial_model %>% predict(x.test)
+plsr.mse <- mean((c.test$exclusivity - p)^2)
+
+
+#Problem 2
+
+drive <- read.csv("C:\\Users\\Jacob\\Documents\\Math 537\\drivPoints.txt")
+no <- lapply(drive[,6:ncol(drive)],function(col){
+  znorm(col)
+}) %>% bind_cols() %>% data.frame
+pred <- drive[,5]
+x <- data.frame(pred,no)
+
+# Pricipal Components Analysis
+# entering raw data and extracting PCs
+# from the correlation matrix
+fit <- princomp(x, cor=TRUE)
+#summary(fit) # print variance accounted for
+#loadings(fit) # pc loadings
+plot(fit,type="lines") # scree plot
+#fit$scores # the principal components
+#biplot(fit) 
+pca <- prcomp(x[,-1])
+pca$rotation[,1:4]
+
+
+# Factor Analysis
+
+#In this dataset the 4,5 columns are response information
+
+#We're first going to do some exploratory factor analysis, then we'll play around with some confirmatory factor analysis.  First step is to isolate the predictors.
+
+X = drive[,-c(1:5)]
+
+# Determine Number of Factors to Extract
+library(nFactors)
+ev <- eigen(cor(X)) # get eigenvalues
+ap <- parallel(subject=nrow(X),var=ncol(X),
+               rep=100,cent=.05)
+nS <- nScree(x=ev$values, aparallel=ap$eigen$qevpea)
+plotnScree(nS) 
+
+fact.model = factanal(X,factors=4,rotation="varimax")
+fact.model
+names(fact.model)
+fact.model$loadings
+loadings = fact.model$loadings[,1:3]
+plot(loadings,type="n")
+text(loadings,labels=names(X),cex=.7)
+lines(c(-2,2),c(0,0),lty=2,lwd=.7)
+lines(c(0,0),c(-2,2),lty=2,lwd=.7)
+
+```
+
